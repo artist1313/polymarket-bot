@@ -29,6 +29,7 @@ CHANNEL_ID       = "@polyreg"
 OPENROUTER_KEY   = "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"
 SITE_URL         = "https://polyreg.icu"
 SITE_NAME        = "Polyreg"
+REFERRAL_URL     = "https://polymarket.com/?r=artist1312"
 
 # ============================================================
 # ⚙️ SIGNAL SETTINGS
@@ -36,6 +37,7 @@ SITE_NAME        = "Polyreg"
 SIGNALS_PER_DAY         = 4      # total signals per day
 MIN_BUY_SIGNALS_PER_DAY = 2      # minimum BUY signals per day
 MIN_VOLUME              = 50000  # minimum market volume in USDC
+ODDS_CHANGE_THRESHOLD   = 4.0    # minimum price movement % to trigger signal
 SIGNAL_HOURS_GMT3       = [9, 12, 16, 20]  # GMT+3 schedule
 TIMEZONE                = pytz.timezone("Europe/Moscow")  # GMT+3
 
@@ -93,6 +95,47 @@ def fetch_price(token_id: str) -> float | None:
         return round(price, 1)
     except Exception:
         return None
+
+
+def fetch_price_change(token_id: str) -> dict | None:
+    """
+    Берёт историю цен из CLOB API за последние 2 часа.
+    Возвращает текущую цену и реальное изменение в %.
+    """
+    try:
+        # Запрашиваем историю цен с интервалом 1 час
+        r = requests.get(
+            "https://clob.polymarket.com/prices-history",
+            params={
+                "market": token_id,
+                "interval": "1h",
+                "fidelity": 60  # точки каждые 60 минут
+            },
+            timeout=10
+        )
+        r.raise_for_status()
+        data = r.json()
+        history = data.get("history", [])
+
+        if len(history) < 2:
+            # Если истории нет — берём просто текущую цену
+            current = fetch_price(token_id)
+            return {"price": current, "change": 0.0} if current else None
+
+        # Текущая цена — последняя точка
+        current = round(float(history[-1].get("p", 0)) * 100, 1)
+        # Цена 2 часа назад — предпоследняя или раньше
+        idx = max(0, len(history) - 3)
+        old = round(float(history[idx].get("p", 0)) * 100, 1)
+
+        change = round(current - old, 1)
+        return {"price": current, "change": change}
+
+    except Exception as e:
+        log.error(f"CLOB price history error: {e}")
+        # Fallback — текущая цена без изменения
+        current = fetch_price(token_id)
+        return {"price": current, "change": 0.0} if current else None
 
 
 # ============================================================
@@ -169,8 +212,8 @@ ACTION_EMOJI = {
 }
 
 def format_signal(signal_num: int, question: str, current_odds: float,
-                  volume: float, ai: dict, slug: str = "") -> str:
-    """Форматирует финальное сообщение сигнала"""
+                  volume: float, ai: dict, slug: str = "", change: float = 0.0) -> str:
+    """Formats the signal message"""
 
     action     = ai.get("action", "WAIT")
     reason     = ai.get("reason", "")
@@ -180,19 +223,21 @@ def format_signal(signal_num: int, question: str, current_odds: float,
     emoji      = ACTION_EMOJI.get(action, "🔍")
     vol_str    = f"${volume/1000:.0f}K" if volume < 1_000_000 else f"${volume/1_000_000:.1f}M"
     target_str = f" · target {target}%" if target else ""
+    arrow      = f"▲ +{change:.1f}%" if change > 0 else (f"▼ {change:.1f}%" if change < 0 else "")
+    change_str = f"  {arrow}" if arrow else ""
 
-    # Укорачиваем вопрос если длинный
     q = question if len(question) <= 60 else question[:57] + "..."
 
     msg = (
         f"{emoji} *Signal #{signal_num}* — {badge}\n"
         f"━━━━━━━━━━━━━━━━\n"
         f"*{q}*\n\n"
-        f"*{current_odds}%* YES  |  {vol_str}\n\n"
+        f"*{current_odds}%* YES{change_str}  |  {vol_str}\n\n"
         f"_{reason}_\n\n"
         f"*→ {badge}{target_str}*\n"
         f"━━━━━━━━━━━━━━━━\n"
-        f"[📊 View on Polymarket](https://polymarket.com/event/{slug})"
+        f"[📊 View on Polymarket](https://polymarket.com/event/{slug})\n"
+        f"[🚀 Trade on Polymarket]({REFERRAL_URL})"
     )
     return msg
 
@@ -203,10 +248,11 @@ def format_signal(signal_num: int, question: str, current_odds: float,
 
 def find_candidates(markets: list, limit: int = 5) -> list:
     """
-    Собирает топ-N кандидатов по объёму.
-    Возвращает список, не один рынок.
+    Ищет рынки с реальным движением цены 4%+ за последние 2 часа.
+    Если таких нет — берёт топ по объёму как fallback.
     """
-    candidates = []
+    movers = []    # рынки с движением 4%+
+    fallback = []  # топ по объёму если нет движений
 
     for market in markets:
         volume = float(market.get("volume", 0))
@@ -226,28 +272,44 @@ def find_candidates(markets: list, limit: int = 5) -> list:
             if not token_id:
                 continue
 
-            price = fetch_price(token_id)
-            if price is None:
+            result = fetch_price_change(token_id)
+            if result is None:
                 continue
 
-            # Пропускаем экстремальные рынки (>95% или <5%)
+            price = result["price"]
+            change = result["change"]
+
             if price > 95 or price < 5:
                 continue
 
-            candidates.append({
+            entry = {
                 "question": market.get("question", ""),
                 "current_odds": price,
+                "change": change,
                 "volume": volume,
                 "market_id": market_id,
                 "slug": market.get("slug", ""),
-            })
-            break  # только YES токен
+            }
+
+            if abs(change) >= ODDS_CHANGE_THRESHOLD:
+                movers.append(entry)
+            else:
+                fallback.append(entry)
+
+            break
 
         time.sleep(0.2)
 
-    candidates.sort(key=lambda x: x["volume"], reverse=True)
-    log.info(f"Найдено кандидатов: {len(candidates)}")
-    return candidates[:limit]
+    # Приоритет — рынки с реальным движением 4%+
+    if movers:
+        movers.sort(key=lambda x: abs(x["change"]), reverse=True)
+        log.info(f"Markets with 4%+ movement: {len(movers)}")
+        return movers[:limit]
+
+    # Fallback — топ по объёму
+    fallback.sort(key=lambda x: x["volume"], reverse=True)
+    log.info(f"No movers, fallback to top {len(fallback)} by volume")
+    return fallback[:limit]
 
 
 # ============================================================
@@ -342,7 +404,8 @@ async def job_signal():
             "━━━━━━━━━━━━━━━━\n"
             "No buy signals at this time.\n\n"
             "_Markets show no clear inefficiency — better to wait._\n\n"
-            "⏰ Next check on schedule."
+            f"⏰ Next check on schedule.\n"
+            f"[🚀 Trade on Polymarket]({REFERRAL_URL})"
         ))
         return
 
@@ -356,7 +419,8 @@ async def job_signal():
         current_odds=chosen["current_odds"],
         volume=chosen["volume"],
         ai=chosen_ai,
-        slug=chosen.get("slug", "")
+        slug=chosen.get("slug", ""),
+        change=chosen.get("change", 0.0)
     )
 
     await send(bot, text)
