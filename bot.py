@@ -166,7 +166,7 @@ ACTION_EMOJI = {
 }
 
 def format_signal(signal_num: int, question: str, current_odds: float,
-                  change: float, volume: float, ai: dict) -> str:
+                  change: float, volume: float, ai: dict, slug: str = "") -> str:
     """Форматирует финальное сообщение сигнала"""
 
     action     = ai.get("action", "WAIT")
@@ -190,7 +190,7 @@ def format_signal(signal_num: int, question: str, current_odds: float,
         f"_{reason}_\n\n"
         f"*→ {badge}{target_str}*\n"
         f"━━━━━━━━━━━━━━━━\n"
-        f"[Trade on {SITE_NAME}]({SITE_URL})"
+        f"[📊 View on Polymarket](https://polymarket.com/event/{slug})"
     )
     return msg
 
@@ -236,6 +236,7 @@ def find_best_signal(markets: list) -> dict | None:
                         "change": change,
                         "volume": volume,
                         "key": key,
+                        "slug": market.get("slug", ""),
                     })
             prev_odds[key] = price
             time.sleep(0.2)
@@ -310,7 +311,8 @@ async def job_signal():
         current_odds=candidate["current_odds"],
         change=candidate["change"],
         volume=candidate["volume"],
-        ai=ai
+        ai=ai,
+        slug=candidate.get("slug", "")
     )
 
     bot = Bot(token=TELEGRAM_TOKEN)
