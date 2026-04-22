@@ -16,6 +16,7 @@ import schedule
 import time
 import logging
 from datetime import datetime
+import pytz
 from telegram import Bot
 from telegram.constants import ParseMode
 import asyncio
@@ -30,14 +31,15 @@ SITE_URL         = "https://polyreg.icu"
 SITE_NAME        = "Polyreg"
 
 # ============================================================
-# ⚙️ ПАРАМЕТРЫ СИГНАЛОВ
+# ⚙️ SIGNAL SETTINGS
 # ============================================================
-SIGNALS_PER_DAY        = 4       # сколько сигналов в день всего
-MIN_BUY_SIGNALS_PER_DAY = 2      # минимум BUY сигналов в день
-MIN_VOLUME             = 50000   # минимальный объём рынка в USDC
-SIGNAL_HOURS           = [9, 12, 16, 20]  # часы отправки сигналов
+SIGNALS_PER_DAY         = 4      # total signals per day
+MIN_BUY_SIGNALS_PER_DAY = 2      # minimum BUY signals per day
+MIN_VOLUME              = 50000  # minimum market volume in USDC
+SIGNAL_HOURS_GMT3       = [9, 12, 16, 20]  # GMT+3 schedule
+TIMEZONE                = pytz.timezone("Europe/Moscow")  # GMT+3
 
-# Рынки которые уже получили сигнал сегодня (не повторяем)
+# Markets that already received a signal today
 sent_today: set = set()
 
 # ============================================================
@@ -273,13 +275,13 @@ async def job_signal():
     """Генерирует и отправляет сигнал — ВСЕГДА пишет в канал по расписанию"""
     global signals_today, buy_signals_today, last_signal_date, sent_today
 
-    today = datetime.now().date()
+    today = datetime.now(TIMEZONE).date()
     if last_signal_date != today:
         signals_today = 0
         buy_signals_today = 0
         last_signal_date = today
         sent_today = set()
-        log.info("Новый день — счётчики сброшены")
+        log.info("New day — counters reset")
 
     if signals_today >= SIGNALS_PER_DAY:
         log.info(f"Лимит сигналов на сегодня достигнут ({SIGNALS_PER_DAY})")
@@ -290,25 +292,15 @@ async def job_signal():
     log.info("🔍 Ищем рынки для сигнала...")
     markets = fetch_markets(limit=50)
     if not markets:
-        log.error("Polymarket API недоступен")
-        await send(bot, "⚠️ *Нет данных*\n\nPolymarket временно недоступен. Следующая проверка по расписанию.")
+        log.error("Polymarket API unavailable")
         return
 
-    # Берём больше кандидатов если нужен BUY сигнал
     need_buy = buy_signals_today < MIN_BUY_SIGNALS_PER_DAY
     limit = 10 if need_buy else 5
     candidates = find_candidates(markets, limit=limit)
 
     if not candidates:
-        log.info("Нет подходящих рынков")
-        signals_today += 1
-        await send(bot, (
-            "🔍 *Мониторинг рынков*\n"
-            "━━━━━━━━━━━━━━━━\n"
-            "Актуальных сигналов пока нет.\n\n"
-            "_Рынки стабильны — ждём хорошей точки входа._\n\n"
-            "⏰ Следующая проверка по расписанию."
-        ))
+        log.info("No suitable markets found")
         return
 
     chosen = None
@@ -343,14 +335,14 @@ async def job_signal():
 
     # Если BUY не нашли и он нужен — отправляем "нет сигнала"
     if chosen is None or (need_buy and chosen_ai.get("action") not in ("BUY_YES", "BUY_NO")):
-        log.info("BUY сигнал не найден — отправляем уведомление об ожидании")
+        log.info("BUY signal not found — sending wait notification")
         signals_today += 1
         await send(bot, (
-            "🔍 *Мониторинг рынков*\n"
+            "🔍 *Market Scan*\n"
             "━━━━━━━━━━━━━━━━\n"
-            "Актуальных сигналов на покупку пока нет.\n\n"
-            "_Рынки не показывают чёткой неэффективности — лучше подождать._\n\n"
-            "⏰ Следующая проверка по расписанию."
+            "No buy signals at this time.\n\n"
+            "_Markets show no clear inefficiency — better to wait._\n\n"
+            "⏰ Next check on schedule."
         ))
         return
 
@@ -380,19 +372,21 @@ def run_signal():
 # ============================================================
 
 def main():
-    log.info("🤖 Polymarket Signals Bot запущен")
-    log.info(f"📡 Канал: {CHANNEL_ID}")
-    log.info(f"⏰ Сигналы в: {SIGNAL_HOURS}")
-    log.info(f"📊 Максимум в день: {SIGNALS_PER_DAY}")
+    log.info("🤖 Polymarket Signals Bot started")
+    log.info(f"📡 Channel: {CHANNEL_ID}")
+    log.info(f"⏰ Schedule GMT+3: {SIGNAL_HOURS_GMT3}")
+    log.info(f"📊 Max signals per day: {SIGNALS_PER_DAY}")
 
-    # Первый прогон сразу при запуске
+    # First run immediately on startup
     run_signal()
 
-    # Расписание по часам
-    for hour in SIGNAL_HOURS:
-        schedule.every().day.at(f"{hour:02d}:00").do(run_signal)
+    # Schedule in UTC (GMT+3 minus 3 hours)
+    for hour in SIGNAL_HOURS_GMT3:
+        utc_hour = (hour - 3) % 24
+        schedule.every().day.at(f"{utc_hour:02d}:00").do(run_signal)
+        log.info(f"Scheduled: {hour:02d}:00 GMT+3 = {utc_hour:02d}:00 UTC")
 
-    log.info("✅ Расписание настроено. Бот работает...")
+    log.info("✅ Schedule set. Bot is running...")
     while True:
         schedule.run_pending()
         time.sleep(60)
