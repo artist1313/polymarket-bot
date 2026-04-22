@@ -104,27 +104,27 @@ def ai_analyze(question: str, current_odds: float, change: float, volume: float)
     - target: целевые odds (если есть)
     """
     import json
-    direction = "вырос" if change > 0 else "упал"
-    prompt = f"""Ты аналитик prediction markets. Дай краткий торговый сигнал.
+    direction = "surged" if change > 0 else "dropped"
+    prompt = f"""You are a prediction markets analyst. Give a short trading signal.
 
-Рынок: {question}
-Текущие odds (YES): {current_odds}%
-Изменение за последние часы: {direction} на {abs(change):.1f}%
-Объём: ${volume:,.0f}
+Market: {question}
+Current odds (YES): {current_odds}%
+Change in last hours: {direction} by {abs(change):.1f}%
+Volume: ${volume:,.0f}
 
-Ответь СТРОГО в формате JSON (без markdown, без лишнего текста):
+Reply STRICTLY in JSON format (no markdown, no extra text):
 {{
   "action": "BUY_YES" | "BUY_NO" | "WAIT",
-  "reason": "1-2 предложения — почему рынок переоценён/недооценён или почему ждать",
-  "target": число или null
+  "reason": "1-2 sentences — why the market is mispriced or why to wait",
+  "target": number or null
 }}
 
-Правила:
-- BUY_YES если рынок недооценивает событие (odds слишком низкие)
-- BUY_NO если рынок переоценивает событие (odds слишком высокие)
-- WAIT если odds справедливы или риск/прибыль невыгодны
-- reason — максимум 20 слов, конкретно и по делу на русском языке
-- target — ожидаемые odds после коррекции, или null"""
+Rules:
+- BUY_YES if market underestimates the event (odds too low)
+- BUY_NO if market overestimates the event (odds too high)
+- WAIT if odds are fair or risk/reward is unfavorable
+- reason — max 20 words, specific and to the point in English
+- target — expected odds after correction, or null"""
 
     try:
         resp = requests.post(
@@ -154,9 +154,9 @@ def ai_analyze(question: str, current_odds: float, change: float, volume: float)
 # ============================================================
 
 ACTION_LABELS = {
-    "BUY_YES": "⚡️ КУПИТЬ YES",
-    "BUY_NO":  "🔻 КУПИТЬ NO",
-    "WAIT":    "⏸ ЖДАТЬ",
+    "BUY_YES": "⚡️ BUY YES",
+    "BUY_NO":  "🔻 BUY NO",
+    "WAIT":    "⏸ WAIT",
 }
 
 ACTION_EMOJI = {
@@ -173,24 +173,24 @@ def format_signal(signal_num: int, question: str, current_odds: float,
     reason     = ai.get("reason", "")
     target     = ai.get("target")
 
-    badge      = ACTION_LABELS.get(action, "⏸ ЖДАТЬ")
+    badge      = ACTION_LABELS.get(action, "⏸ WAIT")
     emoji      = ACTION_EMOJI.get(action, "🔍")
     arrow      = "▲" if change > 0 else "▼"
     vol_str    = f"${volume/1000:.0f}K" if volume < 1_000_000 else f"${volume/1_000_000:.1f}M"
-    target_str = f" · цель {target}%" if target else ""
+    target_str = f" · target {target}%" if target else ""
 
     # Укорачиваем вопрос если длинный
     q = question if len(question) <= 60 else question[:57] + "..."
 
     msg = (
-        f"{emoji} *Сигнал #{signal_num}* — {badge}\n"
+        f"{emoji} *Signal #{signal_num}* — {badge}\n"
         f"━━━━━━━━━━━━━━━━\n"
         f"*{q}*\n\n"
         f"*{current_odds}%* {arrow} {change:+.1f}%  |  {vol_str}\n\n"
         f"_{reason}_\n\n"
         f"*→ {badge}{target_str}*\n"
         f"━━━━━━━━━━━━━━━━\n"
-        f"[Поставить на {SITE_NAME}]({SITE_URL})"
+        f"[Trade on {SITE_NAME}]({SITE_URL})"
     )
     return msg
 
