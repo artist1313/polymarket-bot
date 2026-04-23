@@ -99,17 +99,21 @@ def fetch_price(token_id: str) -> float | None:
 
 def fetch_price_change(token_id: str) -> dict | None:
     """
-    Берёт историю цен из CLOB API за последние 2 часа.
-    Возвращает текущую цену и реальное изменение в %.
+    Gets price history from CLOB API over last 2 hours.
+    Falls back to current price only if history unavailable.
     """
     try:
-        # Запрашиваем историю цен с интервалом 1 час
+        import time as _time
+        now = int(_time.time())
+        two_hours_ago = now - 7200
+
         r = requests.get(
             "https://clob.polymarket.com/prices-history",
             params={
                 "market": token_id,
-                "interval": "1h",
-                "fidelity": 60  # точки каждые 60 минут
+                "startTs": two_hours_ago,
+                "endTs": now,
+                "fidelity": 60
             },
             timeout=10
         )
@@ -117,23 +121,19 @@ def fetch_price_change(token_id: str) -> dict | None:
         data = r.json()
         history = data.get("history", [])
 
-        if len(history) < 2:
-            # Если истории нет — берём просто текущую цену
-            current = fetch_price(token_id)
-            return {"price": current, "change": 0.0} if current else None
+        if len(history) >= 2:
+            current = round(float(history[-1].get("p", 0)) * 100, 1)
+            old_price = round(float(history[0].get("p", 0)) * 100, 1)
+            change = round(current - old_price, 1)
+            if current > 0:
+                return {"price": current, "change": change}
 
-        # Текущая цена — последняя точка
-        current = round(float(history[-1].get("p", 0)) * 100, 1)
-        # Цена 2 часа назад — предпоследняя или раньше
-        idx = max(0, len(history) - 3)
-        old = round(float(history[idx].get("p", 0)) * 100, 1)
-
-        change = round(current - old, 1)
-        return {"price": current, "change": change}
+        # Fallback to current price
+        current = fetch_price(token_id)
+        return {"price": current, "change": 0.0} if current else None
 
     except Exception as e:
         log.error(f"CLOB price history error: {e}")
-        # Fallback — текущая цена без изменения
         current = fetch_price(token_id)
         return {"price": current, "change": 0.0} if current else None
 
