@@ -1,20 +1,12 @@
 """
-Polymarket Signals Bot — с AI анализом через Claude
-=====================================================
-Мониторит Polymarket, анализирует рынки через Claude AI,
-отправляет чёткие сигналы: КУПИТЬ YES / КУПИТЬ NO / ЖДАТЬ
-
-УСТАНОВКА:
-    pip install python-telegram-bot requests schedule
-
-НАСТРОЙКА:
-    Заполни секцию CONFIG ниже и запускай: python bot.py
+Polymarket Signals Bot — AI-powered signals
 """
 
 import requests
 import schedule
 import time
 import logging
+import json
 from datetime import datetime
 import pytz
 from telegram import Bot
@@ -27,31 +19,25 @@ import asyncio
 TELEGRAM_TOKEN   = "8715431400:AAHsu9bZ78D8a42ErFdrtstLdz0BzqScPA8"
 CHANNEL_ID       = "@polyreg"
 OPENROUTER_KEY   = "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"
-SITE_URL         = "https://polyreg.icu"
-SITE_NAME        = "Polyreg"
 REFERRAL_URL     = "https://polymarket.com/?r=artist1312"
 
 # ============================================================
 # ⚙️ SIGNAL SETTINGS
 # ============================================================
-SIGNALS_PER_DAY         = 4      # total signals per day
-MIN_BUY_SIGNALS_PER_DAY = 2      # minimum BUY signals per day
-MIN_VOLUME              = 50000  # minimum market volume in USDC
-ODDS_CHANGE_THRESHOLD   = 4.0    # minimum price movement % to trigger signal
-SIGNAL_HOURS_GMT3       = [9, 12, 16, 20]  # GMT+3 schedule
-TIMEZONE                = pytz.timezone("Europe/Moscow")  # GMT+3
+SIGNALS_PER_DAY         = 4
+MIN_BUY_SIGNALS_PER_DAY = 2
+MIN_VOLUME              = 50000
+SIGNAL_HOURS_GMT3       = [9, 12, 16, 20]
+TIMEZONE                = pytz.timezone("Europe/Moscow")
 
-# Markets that already received a signal today
 sent_today: set = set()
 
-# ============================================================
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
     level=logging.INFO
 )
 log = logging.getLogger(__name__)
 
-# Счётчик сигналов за день
 signals_today = 0
 buy_signals_today = 0
 last_signal_date = None
@@ -62,7 +48,6 @@ last_signal_date = None
 # ============================================================
 
 def fetch_markets(limit: int = 50) -> list:
-    """Получает топ активных рынков по объёму"""
     try:
         r = requests.get(
             "https://gamma-api.polymarket.com/markets",
@@ -82,75 +67,30 @@ def fetch_markets(limit: int = 50) -> list:
         return []
 
 
-def fetch_price(token_id: str) -> float | None:
-    """Получает текущую цену (odds) токена"""
+def get_yes_price(market: dict) -> float | None:
+    """Берёт цену YES прямо из данных рынка — outcomePrices"""
     try:
-        r = requests.get(
-            "https://clob.polymarket.com/last-trade-price",
-            params={"token_id": token_id},
-            timeout=10
-        )
-        r.raise_for_status()
-        price = float(r.json().get("price", 0)) * 100
-        return round(price, 1)
-    except Exception:
-        return None
+        outcomes = market.get("outcomes", "[]")
+        prices_raw = market.get("outcomePrices", "[]")
 
+        if isinstance(outcomes, str):
+            outcomes = json.loads(outcomes)
+        if isinstance(prices_raw, str):
+            prices_raw = json.loads(prices_raw)
 
-def fetch_price_change(token_id: str) -> dict | None:
-    """
-    Gets price history from CLOB API over last 2 hours.
-    Falls back to current price only if history unavailable.
-    """
-    try:
-        import time as _time
-        now = int(_time.time())
-        two_hours_ago = now - 7200
-
-        r = requests.get(
-            "https://clob.polymarket.com/prices-history",
-            params={
-                "market": token_id,
-                "startTs": two_hours_ago,
-                "endTs": now,
-                "fidelity": 60
-            },
-            timeout=10
-        )
-        r.raise_for_status()
-        data = r.json()
-        history = data.get("history", [])
-
-        if len(history) >= 2:
-            current = round(float(history[-1].get("p", 0)) * 100, 1)
-            old_price = round(float(history[0].get("p", 0)) * 100, 1)
-            change = round(current - old_price, 1)
-            if current > 0:
-                return {"price": current, "change": change}
-
-        # Fallback to current price
-        current = fetch_price(token_id)
-        return {"price": current, "change": 0.0} if current else None
-
+        for i, outcome in enumerate(outcomes):
+            if str(outcome).lower() == "yes" and i < len(prices_raw):
+                return round(float(prices_raw[i]) * 100, 1)
     except Exception as e:
-        log.error(f"CLOB price history error: {e}")
-        current = fetch_price(token_id)
-        return {"price": current, "change": 0.0} if current else None
+        log.error(f"Price parse error: {e}")
+    return None
 
 
 # ============================================================
-# CLAUDE AI АНАЛИЗ
+# AI ANALYSIS
 # ============================================================
 
 def ai_analyze(question: str, current_odds: float, volume: float) -> dict | None:
-    """
-    Отправляет данные рынка в OpenRouter и получает:
-    - action: BUY_YES / BUY_NO / WAIT
-    - reason: 1-2 предложения почему
-    - target: целевые odds (если есть)
-    """
-    import json
-
     prompt = f"""You are an aggressive prediction markets trader. Find trading opportunities.
 
 Market: {question}
@@ -167,7 +107,7 @@ Reply STRICTLY in JSON format (no markdown, no extra text):
 Rules:
 - You MUST give BUY_YES or BUY_NO in most cases
 - BUY_YES if there is ANY reason YES is underpriced
-- BUY_NO if there is ANY reason YES is overpriced  
+- BUY_NO if there is ANY reason YES is overpriced
 - WAIT only if odds are perfectly fair with zero edge
 - target — always provide a realistic target odds number
 - reason — specific and confident in English"""
@@ -196,7 +136,7 @@ Rules:
 
 
 # ============================================================
-# ФОРМАТИРОВАНИЕ СООБЩЕНИЙ
+# FORMATTING
 # ============================================================
 
 ACTION_LABELS = {
@@ -212,45 +152,35 @@ ACTION_EMOJI = {
 }
 
 def format_signal(signal_num: int, question: str, current_odds: float,
-                  volume: float, ai: dict, slug: str = "", change: float = 0.0) -> str:
-    """Formats the signal message"""
+                  volume: float, ai: dict, slug: str = "") -> str:
 
     action     = ai.get("action", "WAIT")
     reason     = ai.get("reason", "")
     target     = ai.get("target")
-
     badge      = ACTION_LABELS.get(action, "👀 WATCH")
     emoji      = ACTION_EMOJI.get(action, "🔍")
     vol_str    = f"${volume/1000:.0f}K" if volume < 1_000_000 else f"${volume/1_000_000:.1f}M"
     target_str = f" · target {target}%" if target else ""
-    arrow      = f"▲ +{change:.1f}%" if change > 0 else (f"▼ {change:.1f}%" if change < 0 else "")
-    change_str = f"  {arrow}" if arrow else ""
-
     q = question if len(question) <= 60 else question[:57] + "..."
 
-    msg = (
+    return (
         f"{emoji} *Signal #{signal_num}* — {badge}\n"
         f"━━━━━━━━━━━━━━━━\n"
         f"*{q}*\n\n"
-        f"*{current_odds}%* YES{change_str}  |  {vol_str}\n\n"
+        f"*{current_odds}%* YES  |  {vol_str}\n\n"
         f"_{reason}_\n\n"
         f"*→ {badge}{target_str}*\n"
         f"━━━━━━━━━━━━━━━━\n"
         f"[📊 View on Polymarket](https://polymarket.com/event/{slug})\n"
         f"[🚀 Trade on Polymarket]({REFERRAL_URL})"
     )
-    return msg
 
 
 # ============================================================
-# ЛОГИКА ОТБОРА СИГНАЛОВ
+# SIGNAL SELECTION
 # ============================================================
 
 def find_candidates(markets: list, limit: int = 5) -> list:
-    """
-    Берёт цену прямо из данных рынка (outcomesPrices) — без лишних API запросов.
-    Надёжно работает всегда.
-    """
     candidates = []
 
     for market in markets:
@@ -262,36 +192,15 @@ def find_candidates(markets: list, limit: int = 5) -> list:
         if market_id in sent_today:
             continue
 
-        # Берём цену YES прямо из данных рынка
-        try:
-            outcomes = market.get("outcomes", "[]")
-            prices_raw = market.get("outcomePrices", "[]")
-            if isinstance(outcomes, str):
-                import json
-                outcomes = json.loads(outcomes)
-            if isinstance(prices_raw, str):
-                import json
-                prices_raw = json.loads(prices_raw)
-
-            yes_price = None
-            for i, outcome in enumerate(outcomes):
-                if str(outcome).lower() == "yes" and i < len(prices_raw):
-                    yes_price = round(float(prices_raw[i]) * 100, 1)
-                    break
-
-            if yes_price is None:
-                continue
-            if yes_price > 95 or yes_price < 5:
-                continue
-
-        except Exception as e:
-            log.error(f"Price parse error: {e}")
+        yes_price = get_yes_price(market)
+        if yes_price is None:
+            continue
+        if yes_price > 95 or yes_price < 5:
             continue
 
         candidates.append({
             "question": market.get("question", ""),
             "current_odds": yes_price,
-            "change": 0.0,
             "volume": volume,
             "market_id": market_id,
             "slug": market.get("slug", ""),
@@ -303,7 +212,7 @@ def find_candidates(markets: list, limit: int = 5) -> list:
 
 
 # ============================================================
-# ОТПРАВКА В TELEGRAM
+# TELEGRAM
 # ============================================================
 
 async def send(bot: Bot, text: str):
@@ -314,17 +223,16 @@ async def send(bot: Bot, text: str):
             parse_mode=ParseMode.MARKDOWN,
             disable_web_page_preview=True
         )
-        log.info("✅ Сообщение отправлено")
+        log.info("✅ Message sent")
     except Exception as e:
         log.error(f"Telegram error: {e}")
 
 
 # ============================================================
-# ГЛАВНЫЕ ЗАДАЧИ
+# MAIN JOB
 # ============================================================
 
 async def job_signal():
-    """Генерирует и отправляет сигнал — ВСЕГДА пишет в канал по расписанию"""
     global signals_today, buy_signals_today, last_signal_date, sent_today
 
     today = datetime.now(TIMEZONE).date()
@@ -336,12 +244,12 @@ async def job_signal():
         log.info("New day — counters reset")
 
     if signals_today >= SIGNALS_PER_DAY:
-        log.info(f"Лимит сигналов на сегодня достигнут ({SIGNALS_PER_DAY})")
+        log.info(f"Daily limit reached ({SIGNALS_PER_DAY})")
         return
 
     bot = Bot(token=TELEGRAM_TOKEN)
 
-    log.info("🔍 Ищем рынки для сигнала...")
+    log.info("🔍 Scanning markets...")
     markets = fetch_markets(limit=50)
     if not markets:
         log.error("Polymarket API unavailable")
@@ -353,14 +261,22 @@ async def job_signal():
 
     if not candidates:
         log.info("No suitable markets found")
+        signals_today += 1
+        await send(bot, (
+            "🔍 *Market Scan*\n"
+            "━━━━━━━━━━━━━━━━\n"
+            "No buy signals at this time.\n\n"
+            "_Markets show no clear inefficiency — better to wait._\n\n"
+            f"⏰ Next check on schedule.\n"
+            f"[🚀 Trade on Polymarket]({REFERRAL_URL})"
+        ))
         return
 
     chosen = None
     chosen_ai = None
 
-    # Пробуем кандидатов — если нужен BUY, пропускаем WAIT
     for c in candidates:
-        log.info(f"Анализируем: {c['question'][:50]}...")
+        log.info(f"Analyzing: {c['question'][:50]}...")
         ai = ai_analyze(
             question=c["question"],
             current_odds=c["current_odds"],
@@ -371,23 +287,18 @@ async def job_signal():
         if not ai:
             continue
 
-        action = ai.get("action")
-
-        if action in ("BUY_YES", "BUY_NO"):
+        if ai.get("action") in ("BUY_YES", "BUY_NO"):
             chosen = c
             chosen_ai = ai
-            log.info(f"Найден BUY сигнал: {action}")
+            log.info(f"BUY signal found: {ai.get('action')}")
             break
 
-        # Запоминаем WAIT как запасной только если BUY уже выполнен
         if chosen is None and not need_buy:
             chosen = c
             chosen_ai = ai
-            log.info("Запасной WATCH сигнал")
 
-    # Если BUY не нашли и он нужен — отправляем "нет сигнала"
     if chosen is None or (need_buy and chosen_ai.get("action") not in ("BUY_YES", "BUY_NO")):
-        log.info("BUY signal not found — sending wait notification")
+        log.info("No BUY signal — sending wait message")
         signals_today += 1
         await send(bot, (
             "🔍 *Market Scan*\n"
@@ -409,12 +320,11 @@ async def job_signal():
         current_odds=chosen["current_odds"],
         volume=chosen["volume"],
         ai=chosen_ai,
-        slug=chosen.get("slug", ""),
-        change=chosen.get("change", 0.0)
+        slug=chosen.get("slug", "")
     )
 
     await send(bot, text)
-    log.info(f"Сигнал #{signals_today} отправлен. Action: {chosen_ai.get('action')} | BUY сегодня: {buy_signals_today}")
+    log.info(f"Signal #{signals_today} sent. Action: {chosen_ai.get('action')} | BUY today: {buy_signals_today}")
 
 
 def run_signal():
@@ -422,7 +332,7 @@ def run_signal():
 
 
 # ============================================================
-# ЗАПУСК
+# START
 # ============================================================
 
 def main():
@@ -431,10 +341,8 @@ def main():
     log.info(f"⏰ Schedule GMT+3: {SIGNAL_HOURS_GMT3}")
     log.info(f"📊 Max signals per day: {SIGNALS_PER_DAY}")
 
-    # First run immediately on startup
     run_signal()
 
-    # Schedule in UTC (GMT+3 minus 3 hours)
     for hour in SIGNAL_HOURS_GMT3:
         utc_hour = (hour - 3) % 24
         schedule.every().day.at(f"{utc_hour:02d}:00").do(run_signal)
