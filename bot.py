@@ -265,7 +265,7 @@ def find_candidates(markets: list, limit: int = 5) -> list:
         # Берём цену YES прямо из данных рынка
         try:
             outcomes = market.get("outcomes", "[]")
-            prices_raw = market.get("outcomesPrices", "[]")
+            prices_raw = market.get("outcomePrices", "[]")
             if isinstance(outcomes, str):
                 import json
                 outcomes = json.loads(outcomes)
