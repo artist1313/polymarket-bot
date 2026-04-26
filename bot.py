@@ -26,7 +26,7 @@ import asyncio
 # ============================================================
 TELEGRAM_TOKEN   = "8715431400:AAHsu9bZ78D8a42ErFdrtstLdz0BzqScPA8"
 CHANNEL_ID       = "@polyreg"
-OPENROUTER_KEY   = "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"
+OPENROUTER_KEY   = "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"
 SITE_URL         = "https://polyreg.icu"
 SITE_NAME        = "Polyreg"
 REFERRAL_URL     = "https://polymarket.com/?r=artist1312"
